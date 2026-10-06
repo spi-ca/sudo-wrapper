@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Linux x86_64 tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install host test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y python3 strace binutils
+          objcopy --help | grep -F -- '--strip-section-headers'
+
+      - name: Install checksum-pinned official Zig
+        env:
+          ZIG_VERSION: '0.17.0'
+          ZIG_SHA256: '1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026'
+        run: |
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" \
+            -o "$archive"
+          printf '%s  %s\n' "$ZIG_SHA256" "$archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-$ZIG_VERSION" >> "$GITHUB_PATH"
+
+      - name: Verify compiler, syntax, and wrappers
+        run: |
+          test "$(zig version)" = '0.17.0'
+          zig fmt --check src/main.zig
+          sh -n build.sh package.sh
+          ./build.sh
+          python3 tests/test_wrapper.py
+          python3 tests/test_package.py
+
+      - name: Check binary rebuild determinism
+        run: |
+          sha256sum zig-out/bin/sudo zig-out/bin/visudo > "$RUNNER_TEMP/binaries.sha256"
+          ./build.sh
+          sha256sum --check --strict "$RUNNER_TEMP/binaries.sha256"
+
+      - name: Package verified binaries
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: ./package.sh
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sudo-wrapper-linux-x86_64
+          path: |
+            zig-out/release/sudo-wrapper-linux-x86_64.tar.gz
+            zig-out/release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
